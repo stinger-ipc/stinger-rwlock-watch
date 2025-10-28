@@ -2,6 +2,8 @@
 name = "stinger-rwlock-watch"
 version = "0.1.0"
 edition = "2021"
+license = "MIT"
+description = "An RwLock with a tokio::watch channel that is notified when releasing the write lock.  Also, a readOnly lock."
 
 [dependencies]
 tokio = { version = "1.41", features = ["sync", "rt", "macros", "time", "rt-multi-thread"] }

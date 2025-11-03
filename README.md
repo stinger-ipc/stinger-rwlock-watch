@@ -55,6 +55,13 @@ async fn main() {
 
 ### Read-Only View Example
 
+**Note:** The read-only view API is gated behind the optional `read_only` feature. To use it, enable the feature in your Cargo commands:
+
+```bash
+cargo run --example read_only --features=read_only
+cargo test --features=read_only
+```
+
 You can create a read-only view that can only read values and subscribe to changes, but cannot acquire write locks:
 
 ```rust
@@ -87,8 +94,8 @@ async fn main() {
 # Basic example
 cargo run --example basic
 
-# Read-only view example
-cargo run --example read_only
+# Read-only view example (requires feature)
+cargo run --example read_only --features=read_only
 ```
 
 ### Running Tests
@@ -103,6 +110,7 @@ The `RwLockWatch<T>` wraps a `tokio::sync::RwLock<T>` and maintains a `tokio::sy
 
 When the `WriteGuard` is dropped (i.e., when the write lock is released), the `Drop` implementation automatically sends the current value to the watch channel, notifying all subscribers.
 
+
 ## API
 
 ### `RwLockWatch<T: Clone>`
@@ -112,9 +120,9 @@ When the `WriteGuard` is dropped (i.e., when the write lock is released), the `D
 - `write() -> WriteGuard<'_, T>` - Acquires a write lock that broadcasts on drop
 - `subscribe() -> watch::Receiver<T>` - Subscribe to receive change notifications
 - `receiver_count() -> usize` - Get the number of active subscribers
-- `read_only() -> ReadOnlyRwLockWatch<T>` - Creates a read-only view
+- `read_only() -> ReadOnlyRwLockWatch<T>` - Creates a read-only view (**requires** `read_only` feature)
 
-### `ReadOnlyRwLockWatch<T: Clone>`
+### `ReadOnlyRwLockWatch<T: Clone>` (**requires** `read_only` feature)
 
 - `read() -> RwLockReadGuard<'_, T>` - Acquires a read lock
 - `subscribe() -> watch::Receiver<T>` - Subscribe to receive change notifications

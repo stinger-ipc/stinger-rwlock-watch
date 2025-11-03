@@ -10,6 +10,7 @@ pub struct RwLockWatch<T: Clone> {
     tx: watch::Sender<T>,
 }
 
+#[cfg(feature = "read_only")]
 /// A read-only view of an RwLockWatch that only allows read operations and subscriptions.
 /// This type cannot acquire write locks.
 #[derive(Clone)]
@@ -59,6 +60,7 @@ impl<T: Clone> RwLockWatch<T> {
         self.tx.receiver_count()
     }
 
+    #[cfg(feature = "read_only")]
     /// Creates a read-only view of this RwLockWatch.
     /// 
     /// The returned `ReadOnlyRwLockWatch` can only acquire read locks and subscribe
@@ -108,6 +110,7 @@ impl<'a, T: Clone> DerefMut for WriteGuard<'a, T> {
     }
 }
 
+#[cfg(feature = "read_only")]
 impl<T: Clone> ReadOnlyRwLockWatch<T> {
     /// Acquires a read lock on the RwLock
     pub async fn read(&self) -> RwLockReadGuard<'_, T> {
@@ -245,6 +248,7 @@ mod tests {
         assert_eq!(val2.unwrap(), 42);
     }
 
+    #[cfg(feature = "read_only")]
     #[tokio::test]
     async fn test_read_only_view() {
         let lock = RwLockWatch::new(100);
@@ -277,6 +281,7 @@ mod tests {
         assert_eq!(*rx.borrow(), 200);
     }
 
+    #[cfg(feature = "read_only")]
     #[tokio::test]
     async fn test_read_only_clone() {
         let lock = RwLockWatch::new(42);
@@ -295,6 +300,7 @@ mod tests {
         assert_eq!(*read2, 99);
     }
 
+    #[cfg(feature = "read_only")]
     #[tokio::test]
     async fn test_read_only_receiver_count() {
         let lock = RwLockWatch::new(0);

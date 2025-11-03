@@ -14,6 +14,12 @@ async fn main() {
     // Clone the read-only view to pass to another task
     let read_only_clone = read_only.clone();
 
+    {
+        let guard = read_only.read().await;
+        // *guard = 123; # This would not compile since it is read-only
+        println!("Initial value via read-only view: {}", *guard);
+    }
+
     // Spawn a reader task with the read-only view
     let reader_handle = tokio::spawn(async move {
         println!("Reader: Using read-only view");

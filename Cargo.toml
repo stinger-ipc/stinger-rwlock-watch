@@ -13,3 +13,4 @@ tokio = { version = "1.41", features = ["full"] }
 
 [features]
 read_only = []
+write_request = []

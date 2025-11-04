@@ -2,30 +2,44 @@ use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 use tokio::sync::{RwLock as TokioRwLock, RwLockReadGuard, RwLockWriteGuard};
 use tokio::sync::watch;
+#[cfg(feature = "write_request")]
+use tokio::sync::mpsc;
 
 /// An RwLock that automatically broadcasts value changes via a tokio::watch channel
 /// whenever a write lock is released.
 pub struct RwLockWatch<T: Clone> {
     inner: Arc<TokioRwLock<T>>,
     tx: watch::Sender<T>,
+    #[cfg(feature = "write_request")]
+    request_tx: mpsc::Sender<T>,
+    #[cfg(feature = "write_request")]
+    request_rx: mpsc::Receiver<T>,
 }
 
 #[cfg(feature = "read_only")]
-/// A read-only view of an RwLockWatch that only allows read operations and subscriptions.
-/// This type cannot acquire write locks.
-#[derive(Clone)]
-pub struct ReadOnlyRwLockWatch<T: Clone> {
-    inner: Arc<TokioRwLock<T>>,
-    tx: watch::Sender<T>,
-}
+mod readonly;
+
+#[cfg(feature = "read_only")]
+pub use readonly::ReadOnlyLockWatch;
+
+#[cfg(feature = "write_request")]
+mod writerequest;
+
+#[cfg(feature = "write_request")]
+pub use writerequest::WriteRequestLockWatch;
 
 impl<T: Clone> RwLockWatch<T> {
     /// Creates a new RwLockWatch with the given initial value
     pub fn new(value: T) -> Self {
         let (tx, _rx) = watch::channel(value.clone());
+        let (request_tx, request_rx) = mpsc::channel(32);
         Self {
             inner: Arc::new(TokioRwLock::new(value)),
             tx,
+            #[cfg(feature = "write_request")]
+            request_tx,
+            #[cfg(feature = "write_request")]
+            request_rx,
         }
     }
 
@@ -53,6 +67,14 @@ impl<T: Clone> RwLockWatch<T> {
         self.tx.subscribe()
     }
 
+    /// Subscribes to to requests to change the value
+    /// 
+    /// Returns a mpsc::Receiver that will be notified whenever a write request is made.
+    #[cfg(feature = "write_request")]
+    pub fn request_subscribe(&self) -> mpsc::Receiver<T> {
+        self.request_tx.subscribe()
+    }
+
     /// Gets a reference to the watch receiver
     /// 
     /// This allows you to check if there are any active subscribers.
@@ -63,13 +85,22 @@ impl<T: Clone> RwLockWatch<T> {
     #[cfg(feature = "read_only")]
     /// Creates a read-only view of this RwLockWatch.
     /// 
-    /// The returned `ReadOnlyRwLockWatch` can only acquire read locks and subscribe
+    /// The returned `ReadOnlyLockWatch` can only acquire read locks and subscribe
     /// to changes, but cannot acquire write locks. This is useful for passing to
     /// code that should only observe the value but not modify it.
-    pub fn read_only(&self) -> ReadOnlyRwLockWatch<T> {
-        ReadOnlyRwLockWatch {
+    pub fn read_only(&self) -> crate::readonly::ReadOnlyLockWatch<T> {
+        crate::readonly::ReadOnlyLockWatch {
             inner: Arc::clone(&self.inner),
-            tx: self.tx.clone(),
+            rx: self.tx.subscribe(),
+        }
+    }
+
+    #[cfg(feature = "write_request")]
+    pub fn write_request(&self) -> WriteRequestLockWatch<T> {
+        WriteRequestLockWatch {
+            inner: Arc::clone(&self.inner),
+            rx: self.tx.subscribe(),
+            request_txt: self.request_tx.clone(),
         }
     }
 }
@@ -110,27 +141,7 @@ impl<'a, T: Clone> DerefMut for WriteGuard<'a, T> {
     }
 }
 
-#[cfg(feature = "read_only")]
-impl<T: Clone> ReadOnlyRwLockWatch<T> {
-    /// Acquires a read lock on the RwLock
-    pub async fn read(&self) -> RwLockReadGuard<'_, T> {
-        self.inner.read().await
-    }
 
-    /// Subscribe to receive notifications when the value changes
-    /// 
-    /// Returns a watch::Receiver that will be notified whenever a write lock is released.
-    pub fn subscribe(&self) -> watch::Receiver<T> {
-        self.tx.subscribe()
-    }
-
-    /// Gets the number of active subscribers
-    /// 
-    /// This allows you to check if there are any active subscribers.
-    pub fn receiver_count(&self) -> usize {
-        self.tx.receiver_count()
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -248,68 +259,4 @@ mod tests {
         assert_eq!(val2.unwrap(), 42);
     }
 
-    #[cfg(feature = "read_only")]
-    #[tokio::test]
-    async fn test_read_only_view() {
-        let lock = RwLockWatch::new(100);
-        let read_only = lock.read_only();
-
-        // Can read from read-only view
-        {
-            let read = read_only.read().await;
-            assert_eq!(*read, 100);
-        }
-
-        // Can subscribe from read-only view
-        let mut rx = read_only.subscribe();
-        assert_eq!(*rx.borrow(), 100);
-
-        // Original lock can still write
-        {
-            let mut write = lock.write().await;
-            *write = 200;
-        }
-
-        // Read-only view sees the change
-        {
-            let read = read_only.read().await;
-            assert_eq!(*read, 200);
-        }
-
-        // Subscription from read-only view receives update
-        rx.changed().await.unwrap();
-        assert_eq!(*rx.borrow(), 200);
-    }
-
-    #[cfg(feature = "read_only")]
-    #[tokio::test]
-    async fn test_read_only_clone() {
-        let lock = RwLockWatch::new(42);
-        let read_only1 = lock.read_only();
-        let read_only2 = read_only1.clone();
-
-        {
-            let mut write = lock.write().await;
-            *write = 99;
-        }
-
-        let read1 = read_only1.read().await;
-        let read2 = read_only2.read().await;
-        
-        assert_eq!(*read1, 99);
-        assert_eq!(*read2, 99);
-    }
-
-    #[cfg(feature = "read_only")]
-    #[tokio::test]
-    async fn test_read_only_receiver_count() {
-        let lock = RwLockWatch::new(0);
-        let read_only = lock.read_only();
-
-        let _rx1 = read_only.subscribe();
-        let _rx2 = read_only.subscribe();
-
-        assert_eq!(read_only.receiver_count(), 2);
-        assert_eq!(lock.receiver_count(), 2);
-    }
 }

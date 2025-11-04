@@ -120,9 +120,9 @@ When the `WriteGuard` is dropped (i.e., when the write lock is released), the `D
 - `write() -> WriteGuard<'_, T>` - Acquires a write lock that broadcasts on drop
 - `subscribe() -> watch::Receiver<T>` - Subscribe to receive change notifications
 - `receiver_count() -> usize` - Get the number of active subscribers
-- `read_only() -> ReadOnlyRwLockWatch<T>` - Creates a read-only view (**requires** `read_only` feature)
+- `read_only() -> ReadOnlyLockWatch<T>` - Creates a read-only view (**requires** `read_only` feature)
 
-### `ReadOnlyRwLockWatch<T: Clone>` (**requires** `read_only` feature)
+### `ReadOnlyLockWatch<T: Clone>` (**requires** `read_only` feature)
 
 - `read() -> RwLockReadGuard<'_, T>` - Acquires a read lock
 - `subscribe() -> watch::Receiver<T>` - Subscribe to receive change notifications

@@ -32,9 +32,7 @@ impl<T: Clone> ReadOnlyLockWatch<T> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::RwLockWatch;
-    use tokio::time::{sleep, Duration};
 
     #[tokio::test]
     async fn test_read_only_view() {
@@ -86,15 +84,4 @@ mod tests {
         assert_eq!(*read2, 99);
     }
 
-    #[tokio::test]
-    async fn test_read_only_receiver_count() {
-        let lock = RwLockWatch::new(0);
-        let read_only = lock.read_only();
-
-        let _rx1 = read_only.subscribe();
-        let _rx2 = read_only.subscribe();
-
-        assert_eq!(read_only.receiver_count(), 2);
-        assert_eq!(lock.receiver_count(), 2);
-    }
 }

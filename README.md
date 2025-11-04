@@ -1,6 +1,6 @@
 # stinger-rwlock-watch
 
-A Rust implementation of an `RwLock` with integrated `tokio::watch` notifications. Whenever a write lock is released, the current value is automatically sent to all subscribers via a `tokio::watch` channel.
+An implementation of an `RwLock` with integrated `tokio::watch` notifications. Whenever a write lock is released with a changed value, the current value is automatically sent to all subscribers via a `tokio::watch` channel.
 
 ## Features
 
@@ -17,7 +17,7 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-stinger-rwlock-watch = "0.1.0"
+stinger-rwlock-watch = "0.2.0"
 tokio = { version = "1.41", features = ["sync", "rt", "macros"] }
 ```
 
@@ -43,32 +43,39 @@ async fn main() {
 
     // Write a new value (this will trigger the notification)
     {
-        let mut write = lock.write().await;
-        *write = 100;
-    } // Notification sent when write lock is dropped
+        let mut writer = lock.write().await;
+        *writer = 100;
+    } // Notification sent when write lock is dropped here.
 
     // Read the value (no notification)
-    let read = lock.read().await;
-    println!("Current value: {}", *read);
+    {
+        let reader = lock.read().await;
+        println!("Current value: {}", *reader);
+    } // reader guard is dropped here.
 }
 ```
 
-### Read-Only View Example
+## Optional Features
 
-**Note:** The read-only view API is gated behind the optional `read_only` feature. To use it, enable the feature in your Cargo commands:
+There are two extensions available with features:
+
+* `read_only` - Adds support for creating read-only views of the lock
+* `write_request` - Adds support for view of the lock that supports only requests to change the locked value.
 
 ```bash
-cargo run --example read_only --features=read_only
-cargo test --features=read_only
+cargo test --features=read_only,write_request
 ```
 
-You can create a read-only view that can only read values and subscribe to changes, but cannot acquire write locks:
+### Read-Only Feature
+
+The read-only feature allows you to create views of the lock that can only read values and subscribe to changes, but cannot acquire write locks.
 
 ```rust
 use stinger_rwlock_watch::RwLockWatch;
 
 #[tokio::main]
 async fn main() {
+    // Create top-level RwLockWatch with an initial value.
     let lock = RwLockWatch::new(42);
     
     // Create a read-only view
@@ -83,51 +90,55 @@ async fn main() {
     });
     
     // Only the original lock can write
-    let mut write = lock.write().await;
-    *write = 100;
+    let mut writer = lock.write().await;
+    *writer = 100;
 }
 ```
 
-### Running the Examples
+#### Running the Examples
 
 ```bash
-# Basic example
-cargo run --example basic
-
-# Read-only view example (requires feature)
 cargo run --example read_only --features=read_only
 ```
 
-### Running Tests
+### Write-Request Feature
 
-```bash
-cargo test
+The write-request feature allows you to create views of the lock that can only read or request changes to the locked value, but cannot directly change the value.  When the `write_request` lock is dropped, the value is sent via `tokio::sync::mpsc` channel to a handler that performs the actual write.
+
+```rust
+use stinger_rwlock_watch::RwLockWatch;
+
+#[tokio::main]
+async fn main() {
+    // Create top-level RwLockWatch with an initial value.
+    let lock = RwLockWatch::new(42);
+    
+    // Create a read-only view
+    let request_lock = lock.write_request();
+    
+    // Request a change to the value
+    {
+        let value = request_lock.write().await;
+        *value = 100;
+    };
+
+    // The value has not been updated
+    {
+        let reader = lock.read().await;
+        println!("Updated value: {}", *reader); // prints 42
+    }
+
+    // Implement a handler to process write requests.
+    let mut recv = lock.take_request_receiver().unwrap();
+    tokio::spawn(async move {
+        while let Some(new_value) = recv.recv().await {
+            let mut writer = lock.write().await;
+            *writer = new_value;
+            println!("Value updated to: {}", *writer);
+        }
+    });
+}
 ```
-
-## How It Works
-
-The `RwLockWatch<T>` wraps a `tokio::sync::RwLock<T>` and maintains a `tokio::sync::watch::Sender<T>`. When you acquire a write lock via `.write().await`, you receive a `WriteGuard` that implements `Deref` and `DerefMut` to allow mutation of the inner value.
-
-When the `WriteGuard` is dropped (i.e., when the write lock is released), the `Drop` implementation automatically sends the current value to the watch channel, notifying all subscribers.
-
-
-## API
-
-### `RwLockWatch<T: Clone>`
-
-- `new(value: T) -> Self` - Creates a new RwLockWatch with an initial value
-- `read() -> RwLockReadGuard<'_, T>` - Acquires a read lock
-- `write() -> WriteGuard<'_, T>` - Acquires a write lock that broadcasts on drop
-- `subscribe() -> watch::Receiver<T>` - Subscribe to receive change notifications
-- `receiver_count() -> usize` - Get the number of active subscribers
-- `read_only() -> ReadOnlyLockWatch<T>` - Creates a read-only view (**requires** `read_only` feature)
-
-### `ReadOnlyLockWatch<T: Clone>` (**requires** `read_only` feature)
-
-- `read() -> RwLockReadGuard<'_, T>` - Acquires a read lock
-- `subscribe() -> watch::Receiver<T>` - Subscribe to receive change notifications
-- `receiver_count() -> usize` - Get the number of active subscribers
-- `clone() -> Self` - Clone the read-only view
 
 ## License
 

@@ -4,6 +4,8 @@ use tokio::sync::{RwLock as TokioRwLock, RwLockReadGuard, RwLockWriteGuard};
 use tokio::sync::watch;
 #[cfg(feature = "write_request")]
 use tokio::sync::mpsc;
+#[cfg(feature = "write_request")]
+use std::sync::Mutex;
 
 /// An RwLock that automatically broadcasts value changes via a tokio::watch channel
 /// whenever a write lock is released.
@@ -13,7 +15,9 @@ pub struct RwLockWatch<T: Clone> {
     #[cfg(feature = "write_request")]
     request_tx: mpsc::Sender<T>,
     #[cfg(feature = "write_request")]
-    request_rx: mpsc::Receiver<T>,
+    // Stored in an Option so it can be "taken" exactly once by a consumer.
+    // Wrapped in Arc<Mutex<..>> so all clones share the same single receiver holder.
+    request_rx: Arc<Mutex<Option<mpsc::Receiver<T>>>>,
 }
 
 #[cfg(feature = "read_only")]
@@ -32,6 +36,7 @@ impl<T: Clone> RwLockWatch<T> {
     /// Creates a new RwLockWatch with the given initial value
     pub fn new(value: T) -> Self {
         let (tx, _rx) = watch::channel(value.clone());
+        #[cfg(feature = "write_request")]
         let (request_tx, request_rx) = mpsc::channel(32);
         Self {
             inner: Arc::new(TokioRwLock::new(value)),
@@ -39,7 +44,7 @@ impl<T: Clone> RwLockWatch<T> {
             #[cfg(feature = "write_request")]
             request_tx,
             #[cfg(feature = "write_request")]
-            request_rx,
+            request_rx: Arc::new(Mutex::new(Some(request_rx))),
         }
     }
 
@@ -67,19 +72,15 @@ impl<T: Clone> RwLockWatch<T> {
         self.tx.subscribe()
     }
 
-    /// Subscribes to to requests to change the value
-    /// 
-    /// Returns a mpsc::Receiver that will be notified whenever a write request is made.
+    /// Takes ownership of the write request receiver (if the `write_request` feature is enabled).
+    ///
+    /// This can be called at most once. Subsequent calls will return `None`.
+    /// A single consumer should own the returned `mpsc::Receiver<T>` and handle
+    /// incoming requested value changes (e.g. to apply validation or mutation logic
+    /// before committing them to the underlying value with a real write()).
     #[cfg(feature = "write_request")]
-    pub fn request_subscribe(&self) -> mpsc::Receiver<T> {
-        self.request_tx.subscribe()
-    }
-
-    /// Gets a reference to the watch receiver
-    /// 
-    /// This allows you to check if there are any active subscribers.
-    pub fn receiver_count(&self) -> usize {
-        self.tx.receiver_count()
+    pub fn take_request_receiver(&self) -> Option<mpsc::Receiver<T>> {
+        self.request_rx.lock().expect("poisoned mutex").take()
     }
 
     #[cfg(feature = "read_only")]
@@ -100,7 +101,7 @@ impl<T: Clone> RwLockWatch<T> {
         WriteRequestLockWatch {
             inner: Arc::clone(&self.inner),
             rx: self.tx.subscribe(),
-            request_txt: self.request_tx.clone(),
+            request_tx: self.request_tx.clone(),
         }
     }
 }
@@ -110,6 +111,10 @@ impl<T: Clone> Clone for RwLockWatch<T> {
         Self {
             inner: Arc::clone(&self.inner),
             tx: self.tx.clone(),
+            #[cfg(feature = "write_request")]
+            request_tx: self.request_tx.clone(),
+            #[cfg(feature = "write_request")]
+            request_rx: Arc::clone(&self.request_rx),
         }
     }
 }
@@ -205,8 +210,6 @@ mod tests {
         let mut rx1 = lock.subscribe();
         let mut rx2 = lock.subscribe();
 
-        assert_eq!(lock.receiver_count(), 2);
-
         // Update the value
         {
             let mut write = lock.write().await;
@@ -257,6 +260,32 @@ mod tests {
         let (val1, val2) = tokio::join!(handle1, handle2);
         assert_eq!(val1.unwrap(), 42);
         assert_eq!(val2.unwrap(), 42);
+    }
+
+    #[cfg(feature = "write_request")]
+    #[tokio::test]
+    async fn test_write_request_flow() {
+        let lock = RwLockWatch::new(0);
+        // Take the receiver exactly once
+        let mut rx = lock.take_request_receiver().expect("receiver available first time");
+        assert!(lock.take_request_receiver().is_none(), "second take should return None");
+
+        // Create a write-request view
+        let request_view = lock.write_request();
+
+        // Perform a request (does not modify underlying value immediately)
+        {
+            let mut req = request_view.write().await;
+            *req = 5; // propose new value
+        } // drop sends request via try_send
+
+        // Receive the requested value
+        let received = rx.recv().await.expect("expected a requested value");
+        assert_eq!(received, 5);
+
+        // Underlying value unchanged until an actual write()
+        let current = *lock.read().await;
+        assert_eq!(current, 0);
     }
 
 }

@@ -1,6 +1,14 @@
+#[cfg(feature = "read_only")]
 use stinger_rwlock_watch::RwLockWatch;
+#[cfg(feature = "read_only")]
 use tokio::time::{sleep, Duration};
 
+#[cfg(not(feature = "read_only"))]
+fn main() {
+    eprintln!("Enable feature 'read_only' to run this example: cargo run --example read_only --features read_only");
+}
+
+#[cfg(feature = "read_only")]
 #[tokio::main]
 async fn main() {
     println!("Read-Only RwLockWatch Example\n");

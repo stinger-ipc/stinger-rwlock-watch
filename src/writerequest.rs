@@ -58,6 +58,14 @@ pub struct WriteRequestGuard<'a, T: Clone> {
     request_tx: mpsc::Sender<(T, Option<oneshot::Sender<Option<T>>>)>,
 }
 
+/// Result of a `commit` operation. `Applied(value)` indicates the handler
+/// responded with a value that was applied; `TimedOut` indicates no response
+/// was received within the provided timeout and the guard reverted.
+pub enum CommitResult<T> {
+    Applied(T),
+    TimedOut,
+}
+
 impl<'a, T: Clone> Deref for WriteRequestGuard<'a, T> {
     type Target = T;
 
@@ -83,16 +91,19 @@ impl<'a, T: Clone> Drop for WriteRequestGuard<'a, T> {
 impl<'a, T: Clone> WriteRequestGuard<'a, T> {
     /// Sends the requested value change to the request channel.
     /// The value is set to the response from the channel, or reverts to the original value on timeout or error.
-    pub async fn commit(&mut self, timeout: std::time::Duration) {
+    pub async fn commit(&mut self, timeout: std::time::Duration) -> CommitResult<T> {
         let (resp_tx, resp_rx) = oneshot::channel();
         let _ = self.request_tx.send((self.value.clone(), Some(resp_tx))).await;
         match tokio::time::timeout(timeout, resp_rx).await {
             Ok(Ok(Some(value))) => {
                 self.value = value.clone();
-                self.original_value = value;
+                self.original_value = value.clone();
+                CommitResult::Applied(value)
             }
             _ => {
+                // revert to original value
                 self.value = self.original_value.clone();
+                CommitResult::TimedOut
             }
         }
     }
@@ -121,7 +132,11 @@ mod tests {
         {
             let mut req = request_view.write().await;
             *req = 42;
-            req.commit(std::time::Duration::from_secs(5)).await;
+            let res = req.commit(std::time::Duration::from_secs(5)).await;
+            match res {
+                CommitResult::Applied(v) => assert_eq!(v, 43),
+                CommitResult::TimedOut => panic!("commit timed out unexpectedly"),
+            }
             assert_eq!(*req, 43);
         }
 
@@ -168,7 +183,11 @@ mod tests {
         for i in 1..=3 {
             let mut req = request_view.write().await;
             *req = i * 10;
-            req.commit(std::time::Duration::from_secs(5)).await;
+            let res = req.commit(std::time::Duration::from_secs(5)).await;
+            match res {
+                CommitResult::Applied(v) => assert_eq!(v, (i * 10) + 11),
+                CommitResult::TimedOut => panic!("commit timed out unexpectedly"),
+            }
             assert_eq!(*req, (i * 10) + 11);
         }
     }

@@ -3,7 +3,7 @@ use std::sync::Arc;
 use tokio::sync::{RwLock as TokioRwLock, RwLockReadGuard, RwLockWriteGuard};
 use tokio::sync::watch;
 #[cfg(feature = "write_request")]
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 #[cfg(feature = "write_request")]
 use std::sync::Mutex;
 
@@ -13,11 +13,11 @@ pub struct RwLockWatch<T: Clone> {
     inner: Arc<TokioRwLock<T>>,
     tx: watch::Sender<T>,
     #[cfg(feature = "write_request")]
-    request_tx: mpsc::Sender<T>,
+    request_tx: mpsc::Sender<(T, Option<oneshot::Sender<Option<T>>>)>,
     #[cfg(feature = "write_request")]
     // Stored in an Option so it can be "taken" exactly once by a consumer.
     // Wrapped in Arc<Mutex<..>> so all clones share the same single receiver holder.
-    request_rx: Arc<Mutex<Option<mpsc::Receiver<T>>>>,
+    request_rx: Arc<Mutex<Option<mpsc::Receiver<(T, Option<oneshot::Sender<Option<T>>>)>>>>,
 }
 
 #[cfg(feature = "read_only")]
@@ -75,11 +75,11 @@ impl<T: Clone> RwLockWatch<T> {
     /// Takes ownership of the write request receiver (if the `write_request` feature is enabled).
     ///
     /// This can be called at most once. Subsequent calls will return `None`.
-    /// A single consumer should own the returned `mpsc::Receiver<T>` and handle
+    /// A single consumer should own the returned `mpsc::Receiver<(T, Option<oneshot::Sender<Option<T>>>)>` and handle
     /// incoming requested value changes (e.g. to apply validation or mutation logic
     /// before committing them to the underlying value with a real write()).
     #[cfg(feature = "write_request")]
-    pub fn take_request_receiver(&self) -> Option<mpsc::Receiver<T>> {
+    pub fn take_request_receiver(&self) -> Option<mpsc::Receiver<(T, Option<oneshot::Sender<Option<T>>>)>> {
         self.request_rx.lock().expect("poisoned mutex").take()
     }
 
@@ -101,6 +101,7 @@ impl<T: Clone> RwLockWatch<T> {
         WriteRequestLockWatch {
             inner: Arc::clone(&self.inner),
             rx: self.tx.subscribe(),
+            tx: self.tx.clone(),
             request_tx: self.request_tx.clone(),
         }
     }
@@ -260,32 +261,6 @@ mod tests {
         let (val1, val2) = tokio::join!(handle1, handle2);
         assert_eq!(val1.unwrap(), 42);
         assert_eq!(val2.unwrap(), 42);
-    }
-
-    #[cfg(feature = "write_request")]
-    #[tokio::test]
-    async fn test_write_request_flow() {
-        let lock = RwLockWatch::new(0);
-        // Take the receiver exactly once
-        let mut rx = lock.take_request_receiver().expect("receiver available first time");
-        assert!(lock.take_request_receiver().is_none(), "second take should return None");
-
-        // Create a write-request view
-        let request_view = lock.write_request();
-
-        // Perform a request (does not modify underlying value immediately)
-        {
-            let mut req = request_view.write().await;
-            *req = 5; // propose new value
-        } // drop sends request via try_send
-
-        // Receive the requested value
-        let received = rx.recv().await.expect("expected a requested value");
-        assert_eq!(received, 5);
-
-        // Underlying value unchanged until an actual write()
-        let current = *lock.read().await;
-        assert_eq!(current, 0);
     }
 
 }

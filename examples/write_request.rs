@@ -14,17 +14,17 @@ async fn main() {
     // Create a lock with write_request feature
     let lock = RwLockWatch::new(0);
 
-    // Take the request receiver (only once)
-    let mut rx = lock.take_request_receiver().expect("receiver available");
-
     // Create a WriteRequestLockWatch
     let request_view = lock.write_request();
 
     // Spawn a task to handle incoming requests
+    let mut rx = lock.take_request_receiver().expect("receiver available");
     let handler = tokio::spawn(async move {
-        while let Some(requested) = rx.recv().await {
-            println!("Received write request: {}", requested);
-            // Here you could validate, log, or apply the request
+        while let Some((value, opt_responder)) = rx.recv().await {
+            println!("Received write request: {}", value);
+            if let Some(responder) = opt_responder {
+                let _ = responder.send(Some(value + 1));
+            }
         }
         println!("Request channel closed");
     });
@@ -32,13 +32,16 @@ async fn main() {
     // Simulate requesting value changes
     for i in 1..=3 {
         let mut req = request_view.write().await;
-        *req = i * 10;
-        println!("Requested value: {}", *req);
+        let req_value = i * 10;
+        *req = req_value;
+        req.commit(std::time::Duration::from_secs(2)).await;
+        println!("Requested value: {} which resulted in {}", req_value, *req);
         drop(req);
-        sleep(Duration::from_millis(100)).await;
+        sleep(Duration::from_millis(500)).await;
     }
 
     // Drop the lock to close the channel
+    println!("Dropping the lock to close the request channel");
     drop(lock);
     sleep(Duration::from_millis(100)).await;
     handler.await.unwrap();

@@ -10,6 +10,7 @@ An implementation of an `RwLock` with integrated `tokio::watch` notifications. W
 - **Zero-Cost Reads**: Reading the lock doesn't trigger any notifications
 - **Clone-able**: The lock can be cloned to share across tasks
 - **Read-Only Views**: Create read-only views that can only read and subscribe, but not write
+- **Write-Request Views**: Create views that can request a change to the value via a channel and response.
 
 ## Usage
 
@@ -60,7 +61,7 @@ async fn main() {
 There are two extensions available with features:
 
 * `read_only` - Adds support for creating read-only views of the lock
-* `write_request` - Adds support for view of the lock that supports only requests to change the locked value.
+* `write_request` - Adds support for view of the lock that can request changes via a channel and receive optional responses.
 
 ```bash
 cargo test --features=read_only,write_request
@@ -103,7 +104,12 @@ cargo run --example read_only --features=read_only
 
 ### Write-Request Feature
 
-The write-request feature allows you to create views of the lock that can only read or request changes to the locked value, but cannot directly change the value.  When the `write_request` lock is dropped, the value is sent via `tokio::sync::mpsc` channel to a handler that performs the actual write.
+The write-request feature allows you to create views of the lock that can send the updated value via a channel to a different task.  The task can then process the write requests as needed and return the updated value.
+
+There are two modes:
+
+* Manual commit: Call the `.commit()` on the write guard to send the updated value.   Await on the method call to block until the value is updated.
+* Automatic commit: When the write guard is dropped, the updated value is sent automatically, but without any promises of success by the remote task.
 
 ```rust
 use stinger_rwlock_watch::RwLockWatch;
@@ -112,6 +118,21 @@ use stinger_rwlock_watch::RwLockWatch;
 async fn main() {
     // Create top-level RwLockWatch with an initial value.
     let lock = RwLockWatch::new(42);
+
+    // Implement a handler to process write requests.
+    let mut recv = lock.take_request_receiver().unwrap();
+    tokio::spawn(async move {
+        while let Some((new_value, optional_callback)) = recv.recv().await {
+            // Do something with the new value.
+            do_something(new_value).await;
+
+            // Send response if callback is provided
+            if let Some(callback) = optional_callback {
+                let _ = callback.send(Some(new_value)); // Send back the updated value (can be different if needed)
+                // If we wend back None, then it indicates failure and the write-guard-value will revert.
+            }
+        }
+    });
     
     // Create a read-only view
     let request_lock = lock.write_request();
@@ -120,6 +141,7 @@ async fn main() {
     {
         let value = request_lock.write().await;
         *value = 100;
+        value.commit().await;
     };
 
     // The value has not been updated
@@ -128,15 +150,7 @@ async fn main() {
         println!("Updated value: {}", *reader); // prints 42
     }
 
-    // Implement a handler to process write requests.
-    let mut recv = lock.take_request_receiver().unwrap();
-    tokio::spawn(async move {
-        while let Some(new_value) = recv.recv().await {
-            let mut writer = lock.write().await;
-            *writer = new_value;
-            println!("Value updated to: {}", *writer);
-        }
-    });
+
 }
 ```
 

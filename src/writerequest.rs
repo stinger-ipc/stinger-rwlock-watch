@@ -13,7 +13,6 @@ pub struct WriteRequestLockWatch<T: Clone> {
     pub(crate) request_tx: mpsc::Sender<(T, Option<oneshot::Sender<Option<T>>>)>,
 }
 
-
 impl<T: Clone> WriteRequestLockWatch<T> {
     /// Acquires a read lock on the RwLock
     pub async fn read(&self) -> RwLockReadGuard<'_, T> {

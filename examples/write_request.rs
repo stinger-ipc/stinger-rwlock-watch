@@ -40,9 +40,7 @@ async fn main() {
         sleep(Duration::from_millis(500)).await;
     }
 
-    // Drop the lock to close the channel
-    println!("Dropping the lock to close the request channel");
+    drop(request_view);
     drop(lock);
-    sleep(Duration::from_millis(100)).await;
     handler.await.unwrap();
 }

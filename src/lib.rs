@@ -13,11 +13,11 @@ pub struct RwLockWatch<T: Clone> {
     inner: Arc<TokioRwLock<T>>,
     tx: watch::Sender<T>,
     #[cfg(feature = "write_request")]
-    request_tx: mpsc::Sender<(T, oneshot::Sender<Option<T>>)>,
+    request_tx: mpsc::Sender<(T, Option<oneshot::Sender<Option<T>>>)>,
     #[cfg(feature = "write_request")]
     // Stored in an Option so it can be "taken" exactly once by a consumer.
     // Wrapped in Arc<Mutex<..>> so all clones share the same single receiver holder.
-    request_rx: Arc<Mutex<Option<mpsc::Receiver<(T, oneshot::Sender<Option<T>>)>>>>,
+    request_rx: Arc<Mutex<Option<mpsc::Receiver<(T, Option<oneshot::Sender<Option<T>>>)>>>>,
 }
 
 #[cfg(feature = "read_only")]
@@ -75,11 +75,11 @@ impl<T: Clone> RwLockWatch<T> {
     /// Takes ownership of the write request receiver (if the `write_request` feature is enabled).
     ///
     /// This can be called at most once. Subsequent calls will return `None`.
-    /// A single consumer should own the returned `mpsc::Receiver<(T, oneshot::Sender<Option<T>>)>` and handle
+    /// A single consumer should own the returned `mpsc::Receiver<(T, Option<oneshot::Sender<Option<T>>>)>` and handle
     /// incoming requested value changes (e.g. to apply validation or mutation logic
     /// before committing them to the underlying value with a real write()).
     #[cfg(feature = "write_request")]
-    pub fn take_request_receiver(&self) -> Option<mpsc::Receiver<(T, oneshot::Sender<Option<T>>)>> {
+    pub fn take_request_receiver(&self) -> Option<mpsc::Receiver<(T, Option<oneshot::Sender<Option<T>>>)>> {
         self.request_rx.lock().expect("poisoned mutex").take()
     }
 
@@ -101,6 +101,7 @@ impl<T: Clone> RwLockWatch<T> {
         WriteRequestLockWatch {
             inner: Arc::clone(&self.inner),
             rx: self.tx.subscribe(),
+            tx: self.tx.clone(),
             request_tx: self.request_tx.clone(),
         }
     }

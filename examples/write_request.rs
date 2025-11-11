@@ -20,9 +20,11 @@ async fn main() {
     // Spawn a task to handle incoming requests
     let mut rx = lock.take_request_receiver().expect("receiver available");
     let handler = tokio::spawn(async move {
-        while let Some((value, responder)) = rx.recv().await {
+        while let Some((value, opt_responder)) = rx.recv().await {
             println!("Received write request: {}", value);
-            let _ = responder.send(Some(value + 1));
+            if let Some(responder) = opt_responder {
+                let _ = responder.send(Some(value + 1));
+            }
         }
         println!("Request channel closed");
     });
@@ -32,13 +34,14 @@ async fn main() {
         let mut req = request_view.write().await;
         let req_value = i * 10;
         *req = req_value;
-        req.send(std::time::Duration::from_secs(1)).await;
+        req.commit(std::time::Duration::from_secs(2)).await;
         println!("Requested value: {} which resulted in {}", req_value, *req);
         drop(req);
-        sleep(Duration::from_millis(100)).await;
+        sleep(Duration::from_millis(500)).await;
     }
 
     // Drop the lock to close the channel
+    println!("Dropping the lock to close the request channel");
     drop(lock);
     sleep(Duration::from_millis(100)).await;
     handler.await.unwrap();

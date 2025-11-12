@@ -30,7 +30,7 @@ pub use readonly::ReadOnlyLockWatch;
 mod writerequest;
 
 #[cfg(feature = "write_request")]
-pub use writerequest::WriteRequestLockWatch;
+pub use writerequest::{WriteRequestLockWatch, CommitResult};
 
 impl<T: Clone> RwLockWatch<T> {
     /// Creates a new RwLockWatch with the given initial value

@@ -2,6 +2,8 @@
 use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 use tokio::sync::{RwLock as TokioRwLock, RwLockReadGuard, RwLockWriteGuard, TryLockError, mpsc, watch, oneshot};
+use tracing::warning;
+
 
 /// A write-request view of an RwLockWatch.  Changes to the guarded value don't persist,
 /// but instead creates a request to change the value via the original lock.
@@ -42,6 +44,7 @@ impl<T: Clone> WriteRequestLockWatch<T> {
             guard, // keep the original guard to block others.
             value: value.clone(),
             original_value: value,
+            dirty: false,
             tx: self.tx.clone(),
             request_tx: self.request_tx.clone(),
         }
@@ -54,6 +57,7 @@ pub struct WriteRequestGuard<'a, T: Clone> {
     guard: RwLockWriteGuard<'a, T>,
     value: T,
     original_value: T,
+    dirty: bool,
     tx: watch::Sender<T>,
     request_tx: mpsc::Sender<(T, Option<oneshot::Sender<Option<T>>>)>,
 }
@@ -76,12 +80,16 @@ impl<'a, T: Clone> Deref for WriteRequestGuard<'a, T> {
 
 impl<'a, T: Clone> DerefMut for WriteRequestGuard<'a, T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
+        self.dirty = true;
         &mut self.value
     }
 }
 
 impl<'a, T: Clone> Drop for WriteRequestGuard<'a, T> {
     fn drop(&mut self) {
+        if !self.dirty {
+            return;
+        }
         *(self.guard) = self.value.clone();
         let _ = self.request_tx.try_send((self.value.clone(), None));
         let _ = self.tx.send(self.value.clone());
@@ -98,11 +106,14 @@ impl<'a, T: Clone> WriteRequestGuard<'a, T> {
             Ok(Ok(Some(value))) => {
                 self.value = value.clone();
                 self.original_value = value.clone();
+                self.dirty = false;
                 CommitResult::Applied(value)
             }
             _ => {
                 // revert to original value
+                warning!("WriteRequestGuard commit timed out, reverting to original value");
                 self.value = self.original_value.clone();
+                self.dirty = false;
                 CommitResult::TimedOut
             }
         }

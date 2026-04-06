@@ -2,7 +2,7 @@
 use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 use tokio::sync::{RwLock as TokioRwLock, RwLockReadGuard, RwLockWriteGuard, TryLockError, mpsc, watch, oneshot};
-use tracing::warning;
+use tracing::warn;
 
 
 /// A write-request view of an RwLockWatch.  Changes to the guarded value don't persist,
@@ -111,7 +111,7 @@ impl<'a, T: Clone> WriteRequestGuard<'a, T> {
             }
             _ => {
                 // revert to original value
-                warning!("WriteRequestGuard commit timed out, reverting to original value");
+                warn!("WriteRequestGuard commit timed out, reverting to original value");
                 self.value = self.original_value.clone();
                 self.dirty = false;
                 CommitResult::TimedOut

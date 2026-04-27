@@ -18,7 +18,7 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-stinger-rwlock-watch = "0.2.0"
+stinger-rwlock-watch = "0.3.6"
 tokio = { version = "1.41", features = ["sync", "rt", "macros"] }
 ```
 
@@ -123,31 +123,30 @@ async fn main() {
     let mut recv = lock.take_request_receiver().unwrap();
     tokio::spawn(async move {
         while let Some((new_value, optional_callback)) = recv.recv().await {
-            // Do something with the new value.
-            do_something(new_value).await;
+            // do something with the new value
 
             // Send response if callback is provided
             if let Some(callback) = optional_callback {
                 let _ = callback.send(Some(new_value)); // Send back the updated value (can be different if needed)
-                // If we wend back None, then it indicates failure and the write-guard-value will revert.
+                // If we send back None, then it indicates failure and the write-guard-value will revert.
             }
         }
     });
     
-    // Create a read-only view
+    // Create a write-request view
     let request_lock = lock.write_request();
     
     // Request a change to the value
     {
-        let value = request_lock.write().await;
-        *value = 100;
-        value.commit().await;
+        let mut guard = request_lock.write().await;
+        *guard = 100;
+        guard.commit(std::time::Duration::from_secs(5)).await;
     };
 
-    // The value has not been updated
+    // The value has been updated
     {
         let reader = lock.read().await;
-        println!("Updated value: {}", *reader); // prints 42
+        println!("Updated value: {}", *reader); // prints 100
     }
 
 

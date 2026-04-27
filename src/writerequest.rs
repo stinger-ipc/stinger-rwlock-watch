@@ -70,7 +70,7 @@ pub enum CommitResult<T> {
     TimedOut,
 }
 
-impl<'a, T: Clone> Deref for WriteRequestGuard<'a, T> {
+impl<T: Clone> Deref for WriteRequestGuard<'_, T> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
@@ -78,14 +78,14 @@ impl<'a, T: Clone> Deref for WriteRequestGuard<'a, T> {
     }
 }
 
-impl<'a, T: Clone> DerefMut for WriteRequestGuard<'a, T> {
+impl<T: Clone> DerefMut for WriteRequestGuard<'_, T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         self.dirty = true;
         &mut self.value
     }
 }
 
-impl<'a, T: Clone> Drop for WriteRequestGuard<'a, T> {
+impl<T: Clone> Drop for WriteRequestGuard<'_, T> {
     fn drop(&mut self) {
         if !self.dirty {
             return;
@@ -96,7 +96,7 @@ impl<'a, T: Clone> Drop for WriteRequestGuard<'a, T> {
     }
 }
 
-impl<'a, T: Clone> WriteRequestGuard<'a, T> {
+impl<T: Clone> WriteRequestGuard<'_, T> {
     /// Sends the requested value change to the request channel.
     /// The value is set to the response from the channel, or reverts to the original value on timeout or error.
     pub async fn commit(&mut self, timeout: std::time::Duration) -> CommitResult<T> {
@@ -104,6 +104,7 @@ impl<'a, T: Clone> WriteRequestGuard<'a, T> {
         let _ = self.request_tx.send((self.value.clone(), Some(resp_tx))).await;
         match tokio::time::timeout(timeout, resp_rx).await {
             Ok(Ok(Some(value))) => {
+                *(self.guard) = value.clone();
                 self.value = value.clone();
                 self.original_value = value.clone();
                 self.dirty = false;
@@ -175,6 +176,89 @@ mod tests {
 
         let reader = lock.read().await;
         assert_eq!(*reader, 45);
+    }
+
+    #[tokio::test]
+    async fn test_drop_dirty_sends_to_request_channel() {
+        let lock = crate::RwLockWatch::new(0);
+        let mut rx = lock.take_request_receiver().expect("receiver available");
+
+        let request_view = lock.write_request();
+        {
+            let mut req = request_view.write().await;
+            *req = 99;
+            // drop without committing — Drop impl should try_send the dirty value
+        }
+
+        match rx.try_recv() {
+            Ok((value, None)) => assert_eq!(value, 99),
+            Ok((_, Some(_))) => panic!("expected no oneshot responder on drop-triggered send"),
+            Err(e) => panic!("expected dirty value on request channel, got: {e}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_drop_dirty_notifies_watch_subscriber() {
+        let lock = crate::RwLockWatch::new(0);
+        let request_view = lock.write_request();
+        let mut sub = request_view.subscribe();
+        sub.borrow_and_update(); // mark current value as seen
+
+        {
+            let mut req = request_view.write().await;
+            *req = 77;
+            // drop without committing — Drop impl should tx.send the dirty value
+        }
+
+        assert!(sub.has_changed().unwrap(), "watch subscriber should have been notified on drop");
+        assert_eq!(*sub.borrow_and_update(), 77);
+    }
+
+    #[tokio::test]
+    async fn test_drop_clean_guard_does_not_send() {
+        let lock = crate::RwLockWatch::new(0);
+        let mut rx = lock.take_request_receiver().expect("receiver available");
+
+        let request_view = lock.write_request();
+        {
+            let req = request_view.write().await;
+            // never modified — guard is not dirty
+            drop(req);
+        }
+
+        assert!(rx.try_recv().is_err(), "clean guard drop should not send to request channel");
+    }
+
+    #[tokio::test]
+    async fn test_commit_sends_before_drop() {
+        let lock = crate::RwLockWatch::new(0);
+        let mut rx = lock.take_request_receiver().expect("receiver available");
+
+        let request_view = lock.write_request();
+        let mut req = request_view.write().await;
+        *req = 55;
+
+        // Spawn a handler that replies before the guard is dropped.
+        let handle = tokio::spawn(async move {
+            match rx.recv().await {
+                Some((value, Some(responder))) => {
+                    let _ = responder.send(Some(value + 1));
+                }
+                other => panic!("unexpected recv: {other:?}"),
+            }
+        });
+
+        let res = req.commit(std::time::Duration::from_secs(5)).await;
+        match res {
+            CommitResult::Applied(v) => assert_eq!(v, 56),
+            CommitResult::TimedOut => panic!("commit timed out unexpectedly"),
+        }
+
+        // Guard is still in scope here — the request was sent and handled before drop.
+        assert_eq!(*req, 56);
+        drop(req);
+
+        handle.await.unwrap();
     }
 
     #[tokio::test]

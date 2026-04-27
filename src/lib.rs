@@ -7,17 +7,22 @@ use tokio::sync::{mpsc, oneshot};
 #[cfg(feature = "write_request")]
 use std::sync::Mutex;
 
+#[cfg(feature = "write_request")]
+type RequestReceiver<T> = mpsc::Receiver<(T, Option<oneshot::Sender<Option<T>>>)>;
+#[cfg(feature = "write_request")]
+type RequestSender<T> = mpsc::Sender<(T, Option<oneshot::Sender<Option<T>>>)>;
+
 /// An RwLock that automatically broadcasts value changes via a tokio::watch channel
 /// whenever a write lock is released.
 pub struct RwLockWatch<T: Clone> {
     inner: Arc<TokioRwLock<T>>,
     tx: watch::Sender<T>,
     #[cfg(feature = "write_request")]
-    request_tx: mpsc::Sender<(T, Option<oneshot::Sender<Option<T>>>)>,
+    request_tx: RequestSender<T>,
     #[cfg(feature = "write_request")]
     // Stored in an Option so it can be "taken" exactly once by a consumer.
     // Wrapped in Arc<Mutex<..>> so all clones share the same single receiver holder.
-    request_rx: Arc<Mutex<Option<mpsc::Receiver<(T, Option<oneshot::Sender<Option<T>>>)>>>>,
+    request_rx: Arc<Mutex<Option<RequestReceiver<T>>>>,
 }
 
 #[cfg(feature = "read_only")]
@@ -79,7 +84,7 @@ impl<T: Clone> RwLockWatch<T> {
     /// incoming requested value changes (e.g. to apply validation or mutation logic
     /// before committing them to the underlying value with a real write()).
     #[cfg(feature = "write_request")]
-    pub fn take_request_receiver(&self) -> Option<mpsc::Receiver<(T, Option<oneshot::Sender<Option<T>>>)>> {
+    pub fn take_request_receiver(&self) -> Option<RequestReceiver<T>> {
         self.request_rx.lock().expect("poisoned mutex").take()
     }
 
@@ -126,14 +131,14 @@ pub struct WriteGuard<'a, T: Clone> {
     tx: &'a watch::Sender<T>,
 }
 
-impl<'a, T: Clone> Drop for WriteGuard<'a, T> {
+impl<T: Clone> Drop for WriteGuard<'_, T> {
     fn drop(&mut self) {
         // Send the current value to all watch subscribers when the write lock is released
         let _ = self.tx.send(self.guard.clone());
     }
 }
 
-impl<'a, T: Clone> Deref for WriteGuard<'a, T> {
+impl<T: Clone> Deref for WriteGuard<'_, T> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
@@ -141,7 +146,7 @@ impl<'a, T: Clone> Deref for WriteGuard<'a, T> {
     }
 }
 
-impl<'a, T: Clone> DerefMut for WriteGuard<'a, T> {
+impl<T: Clone> DerefMut for WriteGuard<'_, T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.guard
     }

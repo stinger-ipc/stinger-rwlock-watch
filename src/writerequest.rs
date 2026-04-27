@@ -10,6 +10,9 @@ use tracing::warn;
 #[derive(Clone)]
 pub struct WriteRequestLockWatch<T: Clone> {
     pub(crate) inner: Arc<TokioRwLock<T>>,
+
+    // The tx/rx pair for broadcasting value changes to all subscribers. This is shared with the original
+    // RwLockWatch so that subscribers see updates from both direct writes and write requests.
     pub(crate) tx: watch::Sender<T>,
     pub(crate) rx: watch::Receiver<T>,
     pub(crate) request_tx: mpsc::Sender<(T, Option<oneshot::Sender<Option<T>>>)>,
@@ -45,7 +48,9 @@ impl<T: Clone> WriteRequestLockWatch<T> {
             value: value.clone(),
             original_value: value,
             dirty: false,
-            tx: self.tx.clone(),
+
+            // When the write request is accepted, the change is broadcast to receivers with this watch sender.
+            tx: self.tx.clone(), 
             request_tx: self.request_tx.clone(),
         }
     }
@@ -54,7 +59,7 @@ impl<T: Clone> WriteRequestLockWatch<T> {
 /// A lock that sends requested value changes via mpsc channel when `commit` is called or when dropped.
 pub struct WriteRequestGuard<'a, T: Clone> {
     #[allow(unused)]
-    guard: RwLockWriteGuard<'a, T>,
+    guard: RwLockWriteGuard<'a, T>, // keep the original guard to block others while this is active.
     value: T,
     original_value: T,
     dirty: bool,
@@ -90,8 +95,10 @@ impl<T: Clone> Drop for WriteRequestGuard<'_, T> {
         if !self.dirty {
             return;
         }
-        *(self.guard) = self.value.clone();
         let _ = self.request_tx.try_send((self.value.clone(), None));
+
+        // Since `drop` is not async, we optimistically update the value and notify subscribers here, even though the request may not be handled yet.
+        *(self.guard) = self.value.clone();
         let _ = self.tx.send(self.value.clone());
     }
 }
@@ -100,19 +107,30 @@ impl<T: Clone> WriteRequestGuard<'_, T> {
     /// Sends the requested value change to the request channel.
     /// The value is set to the response from the channel, or reverts to the original value on timeout or error.
     pub async fn commit(&mut self, timeout: std::time::Duration) -> CommitResult<T> {
+
+        // Once the write request is accepted, we expect to get the value back on this
+        // oneshot channel.
         let (resp_tx, resp_rx) = oneshot::channel();
+
         let _ = self.request_tx.send((self.value.clone(), Some(resp_tx))).await;
         match tokio::time::timeout(timeout, resp_rx).await {
+
+            // The request as been accepted, with the value returned.
             Ok(Ok(Some(value))) => {
+                // Update the innter value and notify watch subscribers that the value has updated.
                 *(self.guard) = value.clone();
+                let _ = self.tx.send(value.clone());
+
+                // Reset the guard state.
                 self.value = value.clone();
                 self.original_value = value.clone();
                 self.dirty = false;
+
                 CommitResult::Applied(value)
             }
             _ => {
-                // revert to original value
-                warn!("WriteRequestGuard commit timed out, reverting to original value");
+                // If the request failed, revert to original value.
+                warn!("WriteRequestGuard commit timed out or otherwise failed; reverting to original value.");
                 self.value = self.original_value.clone();
                 self.dirty = false;
                 CommitResult::TimedOut
@@ -141,6 +159,9 @@ mod tests {
         });
 
         let request_view = lock.write_request();
+        let mut sub = request_view.subscribe();
+        sub.borrow_and_update(); // mark current value as seen
+
         {
             let mut req = request_view.write().await;
             *req = 42;
@@ -151,6 +172,9 @@ mod tests {
             }
             assert_eq!(*req, 43);
         }
+
+        assert!(sub.has_changed().unwrap(), "watch subscriber should have been notified on commit");
+        assert_eq!(*sub.borrow_and_update(), 43);
 
         let reader = lock.read().await;
         assert_eq!(*reader, 43);

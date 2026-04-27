@@ -16,12 +16,19 @@ type RequestSender<T> = mpsc::Sender<(T, Option<oneshot::Sender<Option<T>>>)>;
 /// whenever a write lock is released.
 pub struct RwLockWatch<T: Clone> {
     inner: Arc<TokioRwLock<T>>,
+
+    // The tokio::watch channel is used to broadcast the current value whenever a write lock is released.
     tx: watch::Sender<T>,
+
+    // When the `write_request` feature is enabled, the app can get a request lock instead of the write
+    // lock.  The request lock simply sends the requested value changes via an mpsc channel when committed
+    // or dropped, without actually changing the underlying value.  This allows the app to apply validation//
+    // or mutation logic to requested changes before committing them to the underlying value with a real write().
     #[cfg(feature = "write_request")]
     request_tx: RequestSender<T>,
     #[cfg(feature = "write_request")]
     // Stored in an Option so it can be "taken" exactly once by a consumer.
-    // Wrapped in Arc<Mutex<..>> so all clones share the same single receiver holder.
+    // Wrapped in Arc<Mutex<..>> so all clones are a pointer to the same optional receiver.
     request_rx: Arc<Mutex<Option<RequestReceiver<T>>>>,
 }
 
@@ -40,9 +47,10 @@ pub use writerequest::{WriteRequestLockWatch, CommitResult};
 impl<T: Clone> RwLockWatch<T> {
     /// Creates a new RwLockWatch with the given initial value
     pub fn new(value: T) -> Self {
+        // This tx/rx pair is used to broadcast value changes to all subscribers.
         let (tx, _rx) = watch::channel(value.clone());
         #[cfg(feature = "write_request")]
-        let (request_tx, request_rx) = mpsc::channel(32);
+        let (request_tx, request_rx) = mpsc::channel(8);
         Self {
             inner: Arc::new(TokioRwLock::new(value)),
             tx,
@@ -102,6 +110,10 @@ impl<T: Clone> RwLockWatch<T> {
     }
 
     #[cfg(feature = "write_request")]
+    // Creates a write-request view of this RwLockWatch. This is not
+    // a 'guard', but an object like a RwLock that is limited in scope
+    // to only requesting value changes via the request mpsc channel when
+    // write_request.write() is called. 
     pub fn write_request(&self) -> WriteRequestLockWatch<T> {
         WriteRequestLockWatch {
             inner: Arc::clone(&self.inner),
